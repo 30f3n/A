@@ -359,25 +359,33 @@
         <span id="toast-text">تم النسخ بنجاح</span>
     </div>
 
-    <!-- نافذة رمز الحماية (PIN Lock Screen) -->
+    <!-- نافذة تسجيل دخول المدير عبر Firebase Authentication -->
     <div id="pin-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md hidden items-center justify-center p-4">
         <div class="glass-card w-full max-w-sm rounded-3xl p-6 text-center border border-white/15 shadow-2xl">
-            <div id="pin-shield-box" class="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4 text-2xl border" style="background: rgba(168,85,247,0.15); border-color: rgba(168,85,247,0.35); color: var(--accent);">
-                <i class="fa-solid fa-lock"></i>
+            <div class="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4 text-2xl border"
+                 style="background: rgba(168,85,247,0.15); border-color: rgba(168,85,247,0.35); color: var(--accent);">
+                <i class="fa-solid fa-user-shield"></i>
             </div>
-            <h2 id="pin-modal-title" class="text-xl font-extrabold text-white mb-1">قفل لوحة الإدارة</h2>
-            <p id="pin-modal-desc" class="text-xs text-gray-400 mb-5">أدخل رمز الحماية (PIN) لفتح إعدادات التعديل</p>
+            <h2 class="text-xl font-extrabold text-white mb-1">تسجيل دخول الإدارة</h2>
+            <p class="text-xs text-gray-400 mb-5">سجّل الدخول باستخدام البريد وكلمة المرور المسجلين في Firebase</p>
 
-            <form onsubmit="unlockAdminPanel(event)" class="space-y-4">
-                <input type="password" id="pin-code-input" maxlength="24" placeholder="••••••••••••" required
-                       class="glass-input w-full text-center text-lg sm:text-xl tracking-[0.25em] font-mono py-3 rounded-2xl text-white">
+            <form onsubmit="unlockAdminPanel(event)" class="space-y-3">
+                <input type="email" id="admin-email-input" autocomplete="username" required
+                       placeholder="البريد الإلكتروني" dir="ltr"
+                       class="glass-input w-full text-left py-3 px-4 rounded-2xl text-white">
+                <input type="password" id="admin-password-input" autocomplete="current-password" required
+                       placeholder="كلمة المرور" dir="ltr"
+                       class="glass-input w-full text-left py-3 px-4 rounded-2xl text-white">
 
                 <div class="flex gap-2.5 pt-1">
-                    <button type="button" id="pin-cancel-btn" onclick="closePinModal()" class="flex-1 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-bold transition">
+                    <button type="button" onclick="closePinModal()"
+                            class="flex-1 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-bold transition">
                         إلغاء
                     </button>
-                    <button type="submit" id="pin-unlock-btn" class="flex-1 py-2.5 rounded-xl text-white text-xs font-bold shadow-lg transition" style="background: var(--accent);">
-                        فتح اللوحة
+                    <button type="submit" id="firebase-login-btn"
+                            class="flex-1 py-2.5 rounded-xl text-white text-xs font-bold shadow-lg transition"
+                            style="background: var(--accent);">
+                        تسجيل الدخول
                     </button>
                 </div>
             </form>
@@ -791,18 +799,7 @@
 
                 <!-- تبويب الأمان والنسخ الاحتياطي -->
                 <div id="tab-security" class="tab-panel hidden space-y-4">
-                    <form onsubmit="updatePinCode(event)" class="p-4 rounded-2xl bg-white/[0.03] border border-white/10 space-y-3">
-                        <h3 id="security-pin-heading" class="text-sm font-bold text-white">تغيير رمز الحماية (PIN)</h3>
-                        <p id="security-pin-desc" class="text-xs text-gray-400">أدخل الرمز السري الجديد لحماية لوحة الإدارة الخاصة بك.</p>
-                        <div class="flex gap-2.5">
-                            <input type="password" id="inp-new-pin" minlength="4" maxlength="24" required placeholder="••••••••••••" class="glass-input flex-1 px-4 py-2 rounded-xl text-sm text-white">
-                            <button type="submit" id="btn-save-pin" class="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition">
-                                حفظ الرمز
-                            </button>
-                        </div>
-                    </form>
-
-                    <div class="p-4 rounded-2xl bg-white/[0.03] border border-white/10 space-y-3">
+<div class="p-4 rounded-2xl bg-white/[0.03] border border-white/10 space-y-3">
                         <h3 id="security-backup-heading" class="text-sm font-bold text-white">النسخ الاحتياطي والاستعادة (JSON)</h3>
                         <p id="security-backup-desc" class="text-xs text-gray-400">تصدير بياناتك كملف JSON أو استيراد إعدادات محفوظة مسبقاً.</p>
                         <div class="flex flex-wrap gap-2.5">
@@ -833,6 +830,66 @@
             </div>
         </div>
     </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-auth.js";
+        import { getDatabase, ref, get, set, onValue } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-database.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyB4bVr7zYedSD3H8PFdMKVsv0VTdfzV0-0",
+            authDomain: "mywap-5cad9.firebaseapp.com",
+            databaseURL: "https://mywap-5cad9-default-rtdb.firebaseio.com",
+            projectId: "mywap-5cad9",
+            storageBucket: "mywap-5cad9.firebasestorage.app",
+            messagingSenderId: "84857696457",
+            appId: "1:84857696457:web:e8e5420ad7325d1a581d18",
+            measurementId: "G-8WY6G24XKM"
+        };
+        const ADMIN_UID = "WWyJBoEKdfPLPQ1aYpPsMVB8OvG2";
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getDatabase(app);
+        const stateRef = ref(db, "siteState");
+        let cloudReady = false;
+        let saveTimer = null;
+
+        window.firebaseReady = Promise.resolve(true);
+        window.firebaseLoadState = async () => {
+            try {
+                const snapshot = await get(stateRef);
+                cloudReady = true;
+                return snapshot.exists() ? snapshot.val() : null;
+            } catch (error) {
+                console.error("Firebase read failed:", error);
+                return null;
+            }
+        };
+        window.firebaseSaveState = (data) => {
+            if (!cloudReady || auth.currentUser?.uid !== ADMIN_UID) return;
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(async () => {
+                try { await set(stateRef, data); }
+                catch (error) { console.error("Firebase save failed:", error); window.dispatchEvent(new CustomEvent("firebase-save-error", { detail: error })); }
+            }, 350);
+        };
+        window.firebaseAdminLogin = async (email, password) => {
+            const credential = await signInWithEmailAndPassword(auth, email, password);
+            if (credential.user.uid !== ADMIN_UID) {
+                await signOut(auth);
+                throw new Error("هذا الحساب ليس حساب المدير المحدد.");
+            }
+            return true;
+        };
+        window.firebaseIsAdmin = () => auth.currentUser?.uid === ADMIN_UID;
+
+        // Keep public visitors synchronized with the latest published profile.
+        onValue(stateRef, (snapshot) => {
+            if (!snapshot.exists() || auth.currentUser?.uid === ADMIN_UID) return;
+            const incoming = snapshot.val();
+            if (typeof window.applyFirebaseState === "function") window.applyFirebaseState(incoming);
+        }, (error) => console.error("Firebase live sync failed:", error));
+    </script>
 
     <script>
         const STORAGE_KEY = 'lord_biolink_v1_data';
@@ -1004,7 +1061,6 @@
             quoteAuthor: '',
             song: { type: 'url', title: 'LORD', src: 'LORD.mp3', youtubeId: '', fileName: 'LORD.mp3' },
             accentColor: '#a855f7',
-            pin: 'LORD59038184$',
             views: 1250,
             badges: [
                 { id: 'b1', title: 'Owner', icon: 'fa-solid fa-crown', color: '#f59e0b', customImage: '', visible: true },
@@ -1062,7 +1118,31 @@
             try {
                 localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
             } catch (_) {}
+            // لا تُرسل البيانات إلى السحابة إلا بعد تسجيل دخول حساب المدير.
+            if (typeof window.firebaseSaveState === 'function') {
+                window.firebaseSaveState(state);
+            }
         }
+
+        function mergeIncomingState(incoming) {
+            if (!incoming || typeof incoming !== 'object') return;
+            state = {
+                ...cloneDefaultState(),
+                ...incoming,
+                song: { ...DEFAULT_STATE.song, ...(incoming.song || {}) },
+                badges: Array.isArray(incoming.badges) ? incoming.badges : cloneDefaultState().badges,
+                socials: Array.isArray(incoming.socials) ? incoming.socials : cloneDefaultState().socials
+            };
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (_) {}
+        }
+
+        window.applyFirebaseState = (incoming) => {
+            // لا تستبدل إعدادات المدير أثناء فتح لوحة الإدارة.
+            const adminModal = document.getElementById('admin-modal');
+            if (adminModal && !adminModal.classList.contains('hidden')) return;
+            mergeIncomingState(incoming);
+            if (typeof renderAll === 'function') renderAll();
+        };
 
         let isSongPlaying = false;
         let ytPlayerInstance = null;
@@ -1583,12 +1663,15 @@
 
         function openPinModal() {
             const modal = document.getElementById('pin-modal');
-            const input = document.getElementById('pin-code-input');
-            if (!modal || !input) return;
-            input.value = '';
+            const emailInput = document.getElementById('admin-email-input');
+            const passwordInput = document.getElementById('admin-password-input');
+            if (!modal || !emailInput || !passwordInput) return;
+
+            emailInput.value = '';
+            passwordInput.value = '';
             modal.classList.remove('hidden');
             modal.classList.add('flex');
-            setTimeout(() => input.focus(), 60);
+            setTimeout(() => emailInput.focus(), 60);
         }
 
         function closePinModal() {
@@ -1598,17 +1681,54 @@
             modal.classList.remove('flex');
         }
 
-        function unlockAdminPanel(event) {
+        async function unlockAdminPanel(event) {
             event.preventDefault();
-            const input = document.getElementById('pin-code-input');
-            const entered = input ? input.value.trim() : '';
-            const expected = String(state.pin || 'LORD59038184$').trim();
-            if (entered === expected) {
+
+            const emailInput = document.getElementById('admin-email-input');
+            const passwordInput = document.getElementById('admin-password-input');
+            const loginButton = document.getElementById('firebase-login-btn');
+            const email = emailInput ? emailInput.value.trim() : '';
+            const password = passwordInput ? passwordInput.value : '';
+
+            if (!email || !password) {
+                showToast('أدخل البريد الإلكتروني وكلمة المرور', 'error');
+                return;
+            }
+
+            if (loginButton) {
+                loginButton.disabled = true;
+                loginButton.textContent = 'جارٍ التحقق...';
+            }
+
+            try {
+                // Firebase Authentication يتحقق من بيانات الحساب، ثم يُسمح فقط بمعرّف المدير المحدد.
+                await window.firebaseReady;
+                if (typeof window.firebaseAdminLogin !== 'function') {
+                    throw new Error('خدمة تسجيل الدخول غير جاهزة، حدّث الصفحة وحاول مجدداً.');
+                }
+
+                await window.firebaseAdminLogin(email, password);
+                window.firebaseSaveState(state);
                 closePinModal();
                 openAdminModal();
-            } else {
-                showToast('رمز الحماية غير صحيح', 'error');
-                if (input) { input.value = ''; input.focus(); }
+                showToast('تم تسجيل دخول المدير بنجاح', 'success');
+            } catch (error) {
+                console.error('Firebase admin login failed:', error);
+                const messages = {
+                    'auth/invalid-credential': 'البريد الإلكتروني أو كلمة المرور غير صحيحة',
+                    'auth/user-not-found': 'لا يوجد حساب بهذا البريد الإلكتروني',
+                    'auth/wrong-password': 'كلمة المرور غير صحيحة',
+                    'auth/invalid-email': 'صيغة البريد الإلكتروني غير صحيحة',
+                    'auth/too-many-requests': 'محاولات كثيرة، حاول لاحقاً',
+                    'auth/network-request-failed': 'تعذر الاتصال، تحقق من الإنترنت'
+                };
+                showToast(messages[error.code] || error.message || 'فشل تسجيل الدخول إلى Firebase', 'error');
+            } finally {
+                if (loginButton) {
+                    loginButton.disabled = false;
+                    loginButton.textContent = 'تسجيل الدخول';
+                }
+                if (passwordInput) passwordInput.value = '';
             }
         }
 
@@ -2970,8 +3090,15 @@
             }
         }
 
-        window.addEventListener('DOMContentLoaded', () => {
+        window.addEventListener('DOMContentLoaded', async () => {
             bindSplashAndMediaEvents();
+            try {
+                await window.firebaseReady;
+                const cloudState = await window.firebaseLoadState();
+                if (cloudState) mergeIncomingState(cloudState);
+            } catch (error) {
+                console.warn('Firebase unavailable; using this device local settings.', error);
+            }
             syncSocialInputsByPlatform();
             renderAll();
             restoreBackgroundVideo();
