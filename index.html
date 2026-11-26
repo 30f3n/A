@@ -834,7 +834,9 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-app.js";
         import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-auth.js";
-        import { getDatabase, ref, get, set, onValue } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-database.js";
+        import { getDatabase, ref, get, set, onValue, runTransaction } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-database.js";
+        import { signInAnonymously } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-auth.js";
+        import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-storage.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyB4bVr7zYedSD3H8PFdMKVsv0VTdfzV0-0",
@@ -850,45 +852,105 @@
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getDatabase(app);
+        const storage = getStorage(app);
         const stateRef = ref(db, "siteState");
+        const viewsRef = ref(db, "siteViews");
         let cloudReady = false;
         let saveTimer = null;
+        let latestCloudState = null;
 
         window.firebaseReady = Promise.resolve(true);
+
+        // تحميل إعدادات الموقع المنشورة من قاعدة البيانات.
         window.firebaseLoadState = async () => {
-            try {
-                const snapshot = await get(stateRef);
-                cloudReady = true;
-                return snapshot.exists() ? snapshot.val() : null;
-            } catch (error) {
-                console.error("Firebase read failed:", error);
-                return null;
-            }
+            const snapshot = await get(stateRef);
+            cloudReady = true;
+            latestCloudState = snapshot.exists() ? snapshot.val() : null;
+            return latestCloudState;
         };
+
+        // حفظ جميع إعدادات الموقع من حساب المدير فقط. عداد المشاهدات له مسار مستقل.
         window.firebaseSaveState = (data) => {
             if (!cloudReady || auth.currentUser?.uid !== ADMIN_UID) return;
             clearTimeout(saveTimer);
+            const payload = JSON.parse(JSON.stringify(data || {}));
+            delete payload.views;
             saveTimer = setTimeout(async () => {
-                try { await set(stateRef, data); }
-                catch (error) { console.error("Firebase save failed:", error); window.dispatchEvent(new CustomEvent("firebase-save-error", { detail: error })); }
+                try {
+                    await set(stateRef, payload);
+                    window.dispatchEvent(new CustomEvent("firebase-save-success"));
+                } catch (error) {
+                    console.error("Firebase save failed:", error);
+                    window.dispatchEvent(new CustomEvent("firebase-save-error", { detail: error }));
+                }
             }, 350);
         };
+
         window.firebaseAdminLogin = async (email, password) => {
             const credential = await signInWithEmailAndPassword(auth, email, password);
             if (credential.user.uid !== ADMIN_UID) {
                 await signOut(auth);
                 throw new Error("هذا الحساب ليس حساب المدير المحدد.");
             }
-            return true;
+            // تأكد من قراءة السحابة بعد تسجيل الدخول وقبل السماح بالتعديل.
+            const snapshot = await get(stateRef);
+            cloudReady = true;
+            latestCloudState = snapshot.exists() ? snapshot.val() : null;
+            return { cloudState: latestCloudState };
         };
+
         window.firebaseIsAdmin = () => auth.currentUser?.uid === ADMIN_UID;
 
-        // Keep public visitors synchronized with the latest published profile.
+        // زامن عداد المشاهدات ذرياً حتى لا تضيع الزيادات عند دخول عدة زوار معاً.
+        window.firebaseIncrementViews = async (fallback = 1250) => {
+            if (!auth.currentUser) await signInAnonymously(auth);
+            const result = await runTransaction(viewsRef, current => {
+                const value = Number(current);
+                return Number.isFinite(value) && value >= 0 ? Math.floor(value) + 1 : 1251;
+            });
+            return Number(result.snapshot.val() || 0);
+        };
+
+        // تخزين ملفات الصوت والفيديو في Firebase Storage حتى تعمل على كل الأجهزة.
+        window.firebaseUploadMedia = async (file, folder) => {
+            if (auth.currentUser?.uid !== ADMIN_UID) throw new Error("سجّل دخول المدير أولاً لرفع الملفات.");
+            const safeName = String(file.name || "media").replace(/[^a-zA-Z0-9._-]/g, "_");
+            const path = `site-media/${folder}/${Date.now()}-${safeName}`;
+            const targetRef = storageRef(storage, path);
+            await uploadBytes(targetRef, file, { contentType: file.type || "application/octet-stream" });
+            return { url: await getDownloadURL(targetRef), path };
+        };
+        window.firebaseDeleteMedia = async (path) => {
+            if (!path || auth.currentUser?.uid !== ADMIN_UID) return;
+            await deleteObject(storageRef(storage, path));
+        };
+
+        window.firebaseSetViews = async (value) => {
+            if (auth.currentUser?.uid !== ADMIN_UID) return;
+            const safeValue = Math.max(0, Math.floor(Number(value) || 0));
+            await set(viewsRef, safeValue);
+        };
+
+        window.firebaseLoadViews = async () => {
+            const snapshot = await get(viewsRef);
+            return snapshot.exists() ? Number(snapshot.val() || 0) : null;
+        };
+
+        // استقبال تحديثات إعدادات الموقع مباشرة لدى جميع الزوار.
         onValue(stateRef, (snapshot) => {
             if (!snapshot.exists() || auth.currentUser?.uid === ADMIN_UID) return;
-            const incoming = snapshot.val();
-            if (typeof window.applyFirebaseState === "function") window.applyFirebaseState(incoming);
-        }, (error) => console.error("Firebase live sync failed:", error));
+            latestCloudState = snapshot.val();
+            if (typeof window.applyFirebaseState === "function") window.applyFirebaseState(latestCloudState);
+        }, (error) => {
+            console.error("Firebase live sync failed:", error);
+            window.dispatchEvent(new CustomEvent("firebase-sync-error", { detail: error }));
+        });
+
+        // عداد المشاهدات منفصل عن إعدادات المدير ويصل فورياً لكل الزوار.
+        onValue(viewsRef, (snapshot) => {
+            if (!snapshot.exists()) return;
+            window.dispatchEvent(new CustomEvent("firebase-views-updated", { detail: Number(snapshot.val() || 0) }));
+        }, (error) => console.error("Firebase views sync failed:", error));
     </script>
 
     <script>
@@ -1144,6 +1206,22 @@
             if (typeof renderAll === 'function') renderAll();
         };
 
+        window.addEventListener('firebase-views-updated', (event) => {
+            const value = Number(event.detail);
+            if (!Number.isFinite(value)) return;
+            state.views = value;
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (_) {}
+            const viewsEl = document.getElementById('display-views');
+            if (viewsEl) viewsEl.textContent = value.toLocaleString('en-US');
+            const inpViews = document.getElementById('inp-views');
+            if (inpViews && document.activeElement !== inpViews) inpViews.value = value;
+        });
+
+        window.addEventListener('firebase-save-error', (event) => {
+            console.error('تعذر حفظ التعديلات في Firebase. تحقق من قواعد Realtime Database.', event.detail);
+            if (typeof showToast === 'function') showToast('تعذر الحفظ السحابي: تحقق من قواعد Firebase', 'error');
+        });
+
         let isSongPlaying = false;
         let ytPlayerInstance = null;
         let ytApiRequested = false;
@@ -1172,12 +1250,20 @@
             if (!splashDismissed) {
                 splashDismissed = true;
                 try {
-                    state.views = Number(state.views || 0) + 1;
-                    saveState();
-                    const viewsEl = document.getElementById('display-views');
-                    if (viewsEl) viewsEl.textContent = Number(state.views).toLocaleString('en-US');
-                    const inpViews = document.getElementById('inp-views');
-                    if (inpViews && document.activeElement !== inpViews) inpViews.value = Number(state.views);
+                    // زيادة واحدة لكل جلسة، وتُحفظ سحابياً عبر معاملة ذرية في Firebase.
+                    if (!sessionStorage.getItem('lord_view_counted')) {
+                        sessionStorage.setItem('lord_view_counted', '1');
+                        if (typeof window.firebaseIncrementViews === 'function') {
+                            window.firebaseIncrementViews(state.views).catch((error) => {
+                                console.error('Cloud view counter failed:', error);
+                                state.views = Number(state.views || 0) + 1;
+                                const viewsEl = document.getElementById('display-views');
+                                if (viewsEl) viewsEl.textContent = Number(state.views).toLocaleString('en-US');
+                            });
+                        } else {
+                            state.views = Number(state.views || 0) + 1;
+                        }
+                    }
                 } catch (_) {}
             }
 
@@ -1358,26 +1444,32 @@
             renderSongBadgeAndPanel();
         }
 
-        function uploadAudioFile(event) {
+        async function uploadAudioFile(event) {
             const file = event.target.files && event.target.files[0];
             if (!file) return;
-            const reader = new FileReader();
-            reader.onload = function (e) {
-                const dataUrl = e.target.result;
+            event.target.value = '';
+            try {
+                if (typeof window.firebaseUploadMedia !== 'function') throw new Error('خدمة التخزين السحابي غير جاهزة');
+                showToast('جارٍ رفع الأغنية إلى التخزين السحابي...');
+                const uploaded = await window.firebaseUploadMedia(file, 'audio');
                 const cleanName = file.name.replace(/\.[^/.]+$/, '');
                 if (!state.song) state.song = {};
-                state.song.type = 'file';
-                state.song.src = dataUrl;
+                const oldPath = state.song.storagePath;
+                state.song.type = 'url';
+                state.song.src = uploaded.url;
+                state.song.storagePath = uploaded.path;
                 state.song.youtubeId = '';
                 state.song.fileName = file.name;
                 if (!state.song.title || !state.song.title.trim()) state.song.title = cleanName;
                 saveState();
+                if (oldPath) window.firebaseDeleteMedia(oldPath).catch(console.warn);
                 renderSongBadgeAndPanel();
                 playCurrentSong().catch(() => {});
-                showToast('تم رفع الأغنية بنجاح');
-            };
-            reader.readAsDataURL(file);
-            event.target.value = '';
+                showToast('تم رفع الأغنية سحابياً بنجاح');
+            } catch (error) {
+                console.error('Audio cloud upload failed:', error);
+                showToast(error.message || 'فشل رفع الأغنية إلى Firebase Storage', 'error');
+            }
         }
 
         function applyYoutubeSongUrl() {
@@ -1707,8 +1799,13 @@
                     throw new Error('خدمة تسجيل الدخول غير جاهزة، حدّث الصفحة وحاول مجدداً.');
                 }
 
-                await window.firebaseAdminLogin(email, password);
-                window.firebaseSaveState(state);
+                const loginResult = await window.firebaseAdminLogin(email, password);
+                if (loginResult && loginResult.cloudState) {
+                    mergeIncomingState(loginResult.cloudState);
+                } else {
+                    // أول تشغيل فقط: انشر الإعدادات المحلية الحالية إذا لم توجد بيانات سحابية.
+                    window.firebaseSaveState(state);
+                }
                 closePinModal();
                 openAdminModal();
                 showToast('تم تسجيل دخول المدير بنجاح', 'success');
@@ -1790,6 +1887,12 @@
             if (bgEl) state.bgImage = bgEl.value;
 
             saveState();
+            if (viewsEl && document.activeElement === viewsEl && typeof window.firebaseSetViews === 'function') {
+                window.firebaseSetViews(state.views).catch((error) => {
+                    console.error('Firebase views save failed:', error);
+                    showToast('تعذر حفظ عدد المشاهدات سحابياً', 'error');
+                });
+            }
             renderAll();
         }
 
@@ -1858,10 +1961,18 @@
         async function restoreBackgroundVideo() {
             if (!state.bgVideoName) return;
             try {
-                const blob = await readBgVideo();
-                if (!blob) { state.bgVideoName = ''; saveState(); return; }
-                if (bgVideoObjectUrl) URL.revokeObjectURL(bgVideoObjectUrl);
-                bgVideoObjectUrl = URL.createObjectURL(blob);
+                let blob = null;
+                try { blob = await readBgVideo(); } catch (localError) { console.warn('No local video cache; trying cloud URL.', localError); }
+                if (bgVideoObjectUrl && bgVideoObjectUrl.startsWith('blob:')) URL.revokeObjectURL(bgVideoObjectUrl);
+                if (blob) {
+                    bgVideoObjectUrl = URL.createObjectURL(blob);
+                } else if (state.bgVideoUrl) {
+                    bgVideoObjectUrl = state.bgVideoUrl;
+                } else {
+                    state.bgVideoName = '';
+                    saveState();
+                    return;
+                }
                 renderAll();
                 const status = document.getElementById('bg-video-status');
                 if (status) status.textContent = `الفيديو الحالي: ${state.bgVideoName}`;
@@ -1877,28 +1988,39 @@
             if (!file.type.startsWith('video/')) { showToast('اختر ملف فيديو صالحاً'); return; }
             if (file.size > 100 * 1024 * 1024) { showToast('حجم الفيديو يجب ألا يتجاوز 100MB'); return; }
             const status = document.getElementById('bg-video-status');
-            if (status) status.textContent = 'جارٍ حفظ الفيديو...';
+            if (status) status.textContent = 'جارٍ رفع الفيديو إلى Firebase Storage...';
             try {
+                if (typeof window.firebaseUploadMedia !== 'function') throw new Error('خدمة التخزين السحابي غير جاهزة');
+                const uploaded = await window.firebaseUploadMedia(file, 'background-video');
+                const oldPath = state.bgVideoStoragePath;
                 await storeBgVideo(file);
-                if (bgVideoObjectUrl) URL.revokeObjectURL(bgVideoObjectUrl);
+                if (bgVideoObjectUrl && bgVideoObjectUrl.startsWith('blob:')) URL.revokeObjectURL(bgVideoObjectUrl);
                 bgVideoObjectUrl = URL.createObjectURL(file);
                 state.bgVideoName = file.name;
+                state.bgVideoUrl = uploaded.url;
+                state.bgVideoStoragePath = uploaded.path;
                 saveState();
+                if (oldPath) window.firebaseDeleteMedia(oldPath).catch(console.warn);
                 renderAll();
-                if (status) status.textContent = `الفيديو الحالي: ${file.name}`;
-                showToast('تم تعيين فيديو الخلفية بنجاح');
+                if (status) status.textContent = `الفيديو الحالي: ${file.name} (متزامن سحابياً)`;
+                showToast('تم رفع فيديو الخلفية سحابياً بنجاح');
             } catch (error) {
                 console.error(error);
-                if (status) status.textContent = 'تعذر حفظ الفيديو في هذا المتصفح';
-                showToast('فشل رفع الفيديو؛ جرّب ملفاً أصغر');
+                if (status) status.textContent = 'تعذر رفع الفيديو إلى Firebase Storage';
+                showToast(error.message || 'فشل رفع الفيديو؛ تحقق من إعدادات Firebase Storage', 'error');
             }
         }
 
         async function clearBgVideo() {
             try { await deleteBgVideo(); } catch (error) { console.warn(error); }
-            if (bgVideoObjectUrl) URL.revokeObjectURL(bgVideoObjectUrl);
+            if (state.bgVideoStoragePath && typeof window.firebaseDeleteMedia === 'function') {
+                try { await window.firebaseDeleteMedia(state.bgVideoStoragePath); } catch (error) { console.warn(error); }
+            }
+            if (bgVideoObjectUrl && bgVideoObjectUrl.startsWith('blob:')) URL.revokeObjectURL(bgVideoObjectUrl);
             bgVideoObjectUrl = '';
             state.bgVideoName = '';
+            state.bgVideoUrl = '';
+            state.bgVideoStoragePath = '';
             saveState();
             renderAll();
             const status = document.getElementById('bg-video-status');
@@ -3096,6 +3218,8 @@
                 await window.firebaseReady;
                 const cloudState = await window.firebaseLoadState();
                 if (cloudState) mergeIncomingState(cloudState);
+                const cloudViews = await window.firebaseLoadViews();
+                if (cloudViews !== null) state.views = cloudViews;
             } catch (error) {
                 console.warn('Firebase unavailable; using this device local settings.', error);
             }
